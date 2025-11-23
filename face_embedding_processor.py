@@ -158,10 +158,20 @@ def get_embedding_from_face(face_img: np.ndarray) -> List[float]:
 # Google Cloud Storage Helper Functions
 
 def init_gcs_client(service_account_path: str = 'sa.json'):
-    """Initialize GCS client using service account JSON"""
+    """
+    Initialize GCS client using service account JSON.
+    Supports both file-based (local) and environment-based (Cloud Run) credentials.
+    """
     try:
-        credentials = service_account.Credentials.from_service_account_file(service_account_path)
-        client = storage.Client(credentials=credentials, project=credentials.project_id)
+        # Try to use service account file if it exists (local development)
+        if os.path.exists(service_account_path):
+            credentials = service_account.Credentials.from_service_account_file(service_account_path)
+            client = storage.Client(credentials=credentials, project=credentials.project_id)
+            return client
+
+        # Fall back to environment-based credentials (Cloud Run)
+        # This will use GOOGLE_APPLICATION_CREDENTIALS env var or default service account
+        client = storage.Client()
         return client
     except Exception as e:
         raise RuntimeError(f"Failed to initialize GCS client: {e}")
