@@ -76,10 +76,8 @@ jobs:
             --platform=managed \
             --allow-unauthenticated \
             --service-account=test-803@image-478813.iam.gserviceaccount.com \
-            --memory=16Gi \
-            --cpu=8 \
-            --gpu=1 \
-            --gpu-type=nvidia-l4 \
+            --memory=4Gi \
+            --cpu=4 \
             --execution-environment=gen2 \
             --no-cpu-throttling \
             --set-env-vars="QDRANT_URL=${{ secrets.QDRANT_URL }},QDRANT_PORT=6333,QDRANT_API_KEY=${{ secrets.QDRANT_API_KEY }},QDRANT_COLLECTION=face_embeddings,EMBEDDING_SIZE=512,GCS_BUCKET=${{ env.GCS_BUCKET }},CI_DEPLOY_TIMESTAMP=${{ env.CI_DEPLOY_TIMESTAMP }},CI_COMMIT_HASH=${{ github.sha }}" \
