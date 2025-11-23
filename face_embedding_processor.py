@@ -1089,9 +1089,9 @@ class DigestRequest(BaseModel):
     def __init__(self, **data):
         super().__init__(**data)
         # Validate that either gcs_bucket, s3_bucket+s3_prefix, or local_dir_path is provided
-        has_gcs = self.gcs_bucket
-        has_s3 = self.s3_bucket and self.s3_prefix
-        has_local = self.local_dir_path
+        has_gcs = bool(self.gcs_bucket)
+        has_s3 = bool(self.s3_bucket and self.s3_prefix)
+        has_local = bool(self.local_dir_path)
 
         sources_count = sum([has_gcs, has_s3, has_local])
 
