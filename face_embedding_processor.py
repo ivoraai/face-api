@@ -619,8 +619,19 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
             try:
                 gcs_client = init_gcs_client(gcs_service_account or 'sa.json')
                 gcs_bucket_obj = gcs_client.bucket(gcs_bucket)
-                image_files = list_gcs_images(gcs_bucket, gcs_prefix or '', gcs_client)
-                print(f"Found {len(image_files)} images in GCS bucket gs://{gcs_bucket}/{gcs_prefix or ''}")
+
+                # Normalize GCS prefix: convert './' or '.' to empty string, strip leading './'
+                normalized_prefix = gcs_prefix or ''
+                if normalized_prefix in ('.', './'):
+                    normalized_prefix = ''
+                elif normalized_prefix.startswith('./'):
+                    normalized_prefix = normalized_prefix[2:]
+
+                # Update source with normalized prefix
+                ACTIVE_DIGESTS[job_id]['source'] = f"gs://{gcs_bucket}/{normalized_prefix}"
+
+                image_files = list_gcs_images(gcs_bucket, normalized_prefix, gcs_client)
+                print(f"Found {len(image_files)} images in GCS bucket gs://{gcs_bucket}/{normalized_prefix}")
             except Exception as e:
                 raise ValueError(f"Failed to list images from GCS: {e}")
         elif local_dir_path:
