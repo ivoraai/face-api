@@ -1,0 +1,86 @@
+# Production-optimized Dockerfile with improved security and performance
+# Use: docker build -f Dockerfile.prod -t face-embedding-api:prod .
+
+FROM python:3.11-slim as builder
+
+WORKDIR /app
+
+# Install system dependencies needed for building
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libssl-dev \
+    libffi-dev \
+    python3-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy project files
+COPY pyproject.toml requirements.txt* ./
+COPY face_embedding_processor.py ./
+COPY .env* ./
+
+# Upgrade pip and install dependencies
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install -r requirements.txt 2>/dev/null || \
+    pip install -e . && \
+    pip install retina-face==0.0.17 arcface==0.0.8
+
+# Pre-download and cache models during build (with timeout)
+RUN echo "Caching ML models..." && \
+    timeout 300 python -c "from deepface import DeepFace; import numpy as np; DeepFace.extract_faces(np.ones((100,100,3), dtype=np.uint8), detector_backend='retinaface')" 2>/dev/null || true && \
+    timeout 300 python -c "from deepface import DeepFace; import numpy as np; DeepFace.represent(np.ones((112,112,3), dtype=np.uint8), model_name='ArcFace', enforce_detection=False)" 2>/dev/null || true && \
+    echo "Model caching complete"
+
+# Production stage
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libglib2.0-0 \
+    libglu1 \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application files
+COPY --chown=appuser:appuser face_embedding_processor.py ./
+COPY --chown=appuser:appuser .env* ./
+
+# Create necessary directories with proper permissions
+RUN mkdir -p /app/logs /app/data /app/models && \
+    chown -R appuser:appuser /app && \
+    chmod -R 755 /app/logs /app/data /app/models
+
+# Set Python to unbuffered mode
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Performance tuning
+ENV WORKERS=4
+ENV WORKER_CLASS=uvicorn.workers.UvicornWorker
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/ || exit 1
+
+# Expose port
+EXPOSE 8000
+
+# Switch to non-root user
+USER appuser
+
+# Run with gunicorn for production
+CMD ["uvicorn", "face_embedding_processor:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+requests
+PyJWT
+boto3
+firebase-admin

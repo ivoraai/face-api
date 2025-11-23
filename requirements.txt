@@ -1,0 +1,18 @@
+# Main root-level requirements for Docker build
+# This will be used as fallback if exp/requirements.txt is not available
+
+opencv-python>=4.8.0
+numpy>=1.24.0
+deepface>=0.0.79
+tensorflow>=2.13.0
+tf-keras>=2.13.0
+qdrant-client>=1.7.0
+python-dotenv>=1.0.0
+scikit-learn>=1.3.0
+faiss-cpu>=1.7.4
+pillow>=10.4.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9
+retina-face==0.0.17
+arcface==0.0.8
