@@ -47,6 +47,7 @@ from io import BytesIO
 from PIL import Image, ImageOps
 import uuid
 from datetime import datetime
+import logging
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct
 from deepface import DeepFace
@@ -80,6 +81,14 @@ CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND")
 
 app = FastAPI(title="Face Worker Service")
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+logger.info("Face Worker Service initialized")
 
 # Setup Qdrant client
 if QDRANT_API_KEY:
@@ -148,7 +157,7 @@ def extract_faces_from_image(img: np.ndarray, detector_backend: str = 'retinafac
 def get_embedding_from_face(face_img: np.ndarray) -> List[float]:
     # DeepFace.represent returns list of dicts with 'embedding'
     try:
-        rep = DeepFace.represent(img_path=face_img, model_name='ArcFace', enforce_detection=False, detector_backend='skip')
+        rep = DeepFace.represent(face_img, model_name='ArcFace', enforce_detection=False, detector_backend='skip')
         embedding = np.array(rep[0]['embedding']).tolist()
         return embedding
     except Exception as e:
@@ -367,32 +376,48 @@ async def get_features(image: UploadFile = File(...)):
 
 @app.post('/get-embedding', response_model=Dict[str, List[EmbeddingFaceOut]])
 async def get_embedding(image: UploadFile = File(...)):
+    logger.info(f"[GET-EMBEDDING] Request started - filename: {image.filename}, content_type: {image.content_type}")
+    
     contents = await image.read()
     if not contents:
+        logger.error("[GET-EMBEDDING] No image content provided")
         raise HTTPException(status_code=400, detail='No image provided')
 
+    logger.info(f"[GET-EMBEDDING] Image read successfully - size: {len(contents)} bytes")
+    
     img = read_imagefile(contents)
     if img is None:
+        logger.error("[GET-EMBEDDING] Failed to decode image")
         raise HTTPException(status_code=400, detail='Invalid image file')
 
+    logger.info(f"[GET-EMBEDDING] Image decoded - shape: {img.shape}")
+
     try:
+        logger.info("[GET-EMBEDDING] Starting face detection with RetinaFace")
         face_objs = extract_faces_from_image(img, detector_backend='retinaface')
+        logger.info(f"[GET-EMBEDDING] Face detection complete - faces found: {len(face_objs)}")
     except Exception as e:
+        logger.error(f"[GET-EMBEDDING] Face detection failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
     faces_out = []
     for idx, fo in enumerate(face_objs):
+        logger.info(f"[GET-EMBEDDING] Processing face {idx + 1}/{len(face_objs)}")
+        
         area = fo['facial_area']
         confidence = float(fo.get('confidence', 1.0))
         x, y, w, h = area['x'], area['y'], area['w'], area['h']
         face_crop = img[y:y+h, x:x+w]
+        logger.debug(f"[GET-EMBEDDING] Face {idx} crop - area: {area}, confidence: {confidence}")
 
         # thumbnail
         face_b64 = crop_and_b64(img, area)
+        logger.debug(f"[GET-EMBEDDING] Face {idx} thumbnail created - base64 length: {len(face_b64)}")
 
         # features
         try:
-            analysis_result = DeepFace.analyze(img_path=face_crop, actions=['age', 'gender', 'emotion'], enforce_detection=False, detector_backend='skip')
+            logger.info(f"[GET-EMBEDDING] Face {idx} - analyzing features (age, gender, emotion)")
+            analysis_result = DeepFace.analyze(face_crop, actions=['age', 'gender', 'emotion'], enforce_detection=False, detector_backend='skip')
             # DeepFace.analyze returns a list; take the first result
             analysis = analysis_result[0] if isinstance(analysis_result, list) and analysis_result else {}
             
@@ -402,17 +427,23 @@ async def get_embedding(image: UploadFile = File(...)):
                 'gender': analysis.get('dominant_gender') if isinstance(analysis, dict) else None,
                 'landmarks': analysis.get('region', None) if isinstance(analysis, dict) else None
             }
-        except Exception:
+            logger.info(f"[GET-EMBEDDING] Face {idx} features: emotion={features['emotion']}, age={features['age']}, gender={features['gender']}")
+        except Exception as e:
+            logger.warning(f"[GET-EMBEDDING] Face {idx} feature analysis failed (non-critical): {str(e)}")
             features = None
 
         # embedding
         try:
+            logger.info(f"[GET-EMBEDDING] Face {idx} - generating ArcFace embedding")
             embedding = get_embedding_from_face(face_crop)
+            logger.info(f"[GET-EMBEDDING] Face {idx} embedding generated - size: {len(embedding)}")
         except Exception as e:
+            logger.error(f"[GET-EMBEDDING] Face {idx} embedding failed: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
         faces_out.append(EmbeddingFaceOut(face_id=idx, face_b64=face_b64, facial_area=area, features=features, embedding=embedding))
 
+    logger.info(f"[GET-EMBEDDING] Request completed successfully - total faces processed: {len(faces_out)}")
     return {"faces": faces_out}
 
 
@@ -560,20 +591,24 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
 
     For GCS: Creates thumbnails (1000x1000 max) and uploads to /thumbnail/ directory in the same bucket.
     """
+    logger.info(f"[DIGEST {job_id}] Job started - group_id={group_id}, collection={collection}, threads={threads}")
+    logger.info(f"[DIGEST {job_id}] Source - GCS: {bool(gcs_bucket)}, S3: {bool(s3_bucket)}, Local: {bool(local_dir_path)}")
+    
     try:
         # Ensure collection exists - auto-create if missing
         try:
             qclient.get_collection(collection)
+            logger.info(f"[DIGEST {job_id}] Collection '{collection}' found")
         except Exception:
-            print(f"Collection '{collection}' not found. Creating...")
+            logger.info(f"[DIGEST {job_id}] Collection '{collection}' not found. Creating...")
             try:
                 qclient.create_collection(
                     collection_name=collection,
                     vectors_config=VectorParams(size=EMBEDDING_SIZE, distance=Distance.COSINE)
                 )
-                print(f"Collection '{collection}' created successfully")
+                logger.info(f"[DIGEST {job_id}] Collection '{collection}' created successfully")
             except Exception as e:
-                print(f"Warning: Could not create collection '{collection}': {e}")
+                logger.warning(f"[DIGEST {job_id}] Could not create collection '{collection}': {e}")
         
         # Determine source for tracking
         if gcs_bucket:
@@ -631,21 +666,27 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
                 ACTIVE_DIGESTS[job_id]['source'] = f"gs://{gcs_bucket}/{normalized_prefix}"
 
                 image_files = list_gcs_images(gcs_bucket, normalized_prefix, gcs_client)
-                print(f"Found {len(image_files)} images in GCS bucket gs://{gcs_bucket}/{normalized_prefix}")
+                logger.info(f"[DIGEST {job_id}] Found {len(image_files)} images in GCS bucket gs://{gcs_bucket}/{normalized_prefix}")
             except Exception as e:
+                logger.error(f"[DIGEST {job_id}] Failed to list images from GCS: {e}", exc_info=True)
                 raise ValueError(f"Failed to list images from GCS: {e}")
         elif local_dir_path:
+            logger.info(f"[DIGEST {job_id}] Listing images from local directory: {local_dir_path}")
             dir_path = Path(local_dir_path)
             if not dir_path.exists():
+                logger.error(f"[DIGEST {job_id}] Directory not found: {local_dir_path}")
                 raise ValueError(f"Directory not found: {local_dir_path}")
             # Collect all image files (jpg, png, jpeg, etc)
             for ext in ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']:
                 image_files.extend(dir_path.glob(f"**/{ext}"))
+            logger.info(f"[DIGEST {job_id}] Found {len(image_files)} images in local directory")
         # TODO: Implement S3 listing with boto3
         
         ACTIVE_DIGESTS[job_id]['total_images'] = len(image_files)
+        logger.info(f"[DIGEST {job_id}] Total images to process: {len(image_files)}")
         
         if len(image_files) == 0:
+            logger.warning(f"[DIGEST {job_id}] No images found, marking job as completed")
             ACTIVE_DIGESTS[job_id]['status'] = 'completed'
             ACTIVE_DIGESTS[job_id]['progress'] = 100
             ACTIVE_DIGESTS[job_id]['end_time'] = datetime.now().isoformat()
@@ -667,7 +708,9 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
                     try:
                         img = download_gcs_image(image_source)
                         image_path_str = f"gs://{image_source.bucket.name}/{image_source.name}"
+                        logger.debug(f"[DIGEST {job_id}] Downloaded image from GCS: {image_path_str}")
                     except Exception as e:
+                        logger.error(f"[DIGEST {job_id}] Failed to download {image_path_str} from GCS: {e}")
                         return {
                             'status': 'failed',
                             'image_path': f"gs://{image_source.bucket.name}/{image_source.name}",
@@ -681,9 +724,11 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
                     # Local file
                     img = cv2.imread(str(image_source))
                     image_path_str = str(image_source)
+                    logger.debug(f"[DIGEST {job_id}] Read local image: {image_path_str}")
 
                 if img is None:
                     error_msg = "Could not read image file"
+                    logger.warning(f"[DIGEST {job_id}] Could not read image: {image_path_str}")
                     return {
                         'status': 'failed',
                         'image_path': image_path_str,
@@ -706,8 +751,9 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
                         thumbnail_created = True
                         ACTIVE_DIGESTS[job_id]['total_thumbnails_created'] += 1
                         ACTIVE_DIGESTS[job_id]['total_thumbnails_uploaded'] += 1
+                        logger.debug(f"[DIGEST {job_id}] Thumbnail created for: {image_path_str}")
                     except Exception as e:
-                        print(f"Warning: Thumbnail creation/upload failed for {image_path_str}: {e}")
+                        logger.warning(f"[DIGEST {job_id}] Thumbnail creation/upload failed for {image_path_str}: {e}")
                         ACTIVE_DIGESTS[job_id]['thumbnail_failures'].append({
                             'path': image_path_str,
                             'error': str(e)
@@ -715,17 +761,21 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
                         # Continue processing even if thumbnail fails
                 
                 # Extract faces with retry
+                logger.info(f"[DIGEST {job_id}] Extracting faces from: {image_path_str}")
                 faces = None
                 last_error = None
                 for attempt in range(max_retries + 1):
                     try:
                         faces = DeepFace.extract_faces(img, detector_backend='retinaface', enforce_detection=False)
+                        logger.info(f"[DIGEST {job_id}] Found {len(faces)} faces in {image_path_str}")
                         break
                     except Exception as e:
                         last_error = str(e)
                         if attempt < max_retries:
-                            print(f"Retry {attempt + 1}/{max_retries} for {image_path_str}: {e}")
+                            logger.warning(f"[DIGEST {job_id}] Face extraction retry {attempt + 1}/{max_retries} for {image_path_str}: {e}")
                             continue
+                        else:
+                            logger.error(f"[DIGEST {job_id}] Face extraction failed after {max_retries + 1} attempts for {image_path_str}: {e}")
 
                 if faces is None:
                     return {
@@ -896,11 +946,13 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
         ACTIVE_DIGESTS[job_id]['status'] = 'completed'
         ACTIVE_DIGESTS[job_id]['progress'] = 100
         ACTIVE_DIGESTS[job_id]['end_time'] = datetime.now().isoformat()
+        logger.info(f"[DIGEST {job_id}] Job completed successfully - faces_processed: {ACTIVE_DIGESTS[job_id]['faces_processed']}, thumbnails: {ACTIVE_DIGESTS[job_id]['total_thumbnails_uploaded']}")
         
     except Exception as e:
         ACTIVE_DIGESTS[job_id]['status'] = 'failed'
         ACTIVE_DIGESTS[job_id]['error_message'] = str(e)
         ACTIVE_DIGESTS[job_id]['end_time'] = datetime.now().isoformat()
+        logger.error(f"[DIGEST {job_id}] Job failed with error: {str(e)}", exc_info=True)
 
 
 def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidence: float = 0.8) -> Dict[str, Any]:
@@ -917,6 +969,7 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
         Status dict with clustering results
     """
     job_id = f"cluster-{uuid.uuid4()}"
+    logger.info(f"[CLUSTER {job_id}] Job started - group_id={group_id}, collection={collection}, confidence={confidence}")
     
     # Initialize cluster job tracking
     ACTIVE_CLUSTERS[job_id] = {
@@ -965,6 +1018,7 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
                 break
         
         if not all_points:
+            logger.warning(f"[CLUSTER {job_id}] No faces found for group_id: {group_id}")
             ACTIVE_CLUSTERS[job_id].update({
                 'status': 'completed',
                 'message': f'No faces found for group_id: {group_id}',
@@ -978,7 +1032,7 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
         embeddings = np.array([point.vector for point in all_points])
         point_ids = [point.id for point in all_points]
         
-        print(f"[cluster] Clustering {len(all_points)} faces with confidence={confidence}")
+        logger.info(f"[CLUSTER {job_id}] Clustering {len(all_points)} faces with confidence={confidence}")
         
         # Convert confidence to eps for DBSCAN
         # confidence=0.8 means we want to group faces that are 80% similar
@@ -1002,6 +1056,8 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
                 'index': idx,
                 'original_face_id': all_points[idx].payload.get('face_id')
             })
+        
+        logger.info(f"[CLUSTER {job_id}] Created {len(clusters)} clusters")
         
         # Assign person_id to each cluster and update Qdrant
         person_id_counter = 1
@@ -1029,7 +1085,7 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
                         'cluster_size': len(faces)
                     })
                 except Exception as e:
-                    print(f"[cluster] Error updating point {face['point_id']}: {e}")
+                    logger.error(f"[CLUSTER {job_id}] Error updating point {face['point_id']}: {e}")
             
             person_id_counter += 1
         
@@ -1046,6 +1102,8 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
             "updated_faces": updated_faces[:50]  # Return first 50 for preview
         }
         
+        logger.info(f"[CLUSTER {job_id}] Job completed successfully - clusters: {len(clusters)}, faces_updated: {updated_count}")
+        
         ACTIVE_CLUSTERS[job_id].update({
             'status': 'completed',
             'message': result['message'],
@@ -1056,11 +1114,11 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
             'end_time': datetime.now().isoformat()
         })
         
-        print(f"[cluster] Completed: {result['message']}")
+        logger.info(f"[CLUSTER {job_id}] Completed: {result['message']}")
         return ACTIVE_CLUSTERS[job_id]
         
     except Exception as e:
-        print(f"[cluster] Error: {e}")
+        logger.error(f"[CLUSTER {job_id}] Clustering failed: {e}", exc_info=True)
         ACTIVE_CLUSTERS[job_id].update({
             'status': 'failed',
             'error': str(e),
