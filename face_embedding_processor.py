@@ -34,7 +34,7 @@ If using Celery for background jobs (digest/cluster), run a worker:
 
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -60,6 +60,9 @@ from sklearn.metrics.pairwise import cosine_distances
 from google.cloud import storage
 from google.oauth2 import service_account
 import io
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import re
 
 # Optional Celery
 try:
@@ -272,6 +275,238 @@ def upload_thumbnail_to_gcs(thumbnail_bytes: bytes, original_blob_name: str, buc
         raise RuntimeError(f"Failed to upload thumbnail to GCS: {e}")
 
 
+# Google Drive Helper Functions
+
+def extract_folder_id_from_drive_link(drive_link: str) -> str:
+    """
+    Extract folder ID from Google Drive link.
+    Supports various Google Drive URL formats:
+    - https://drive.google.com/drive/folders/FOLDER_ID
+    - https://drive.google.com/drive/folders/FOLDER_ID?usp=sharing
+    """
+    patterns = [
+        r'drive\.google\.com/drive/folders/([a-zA-Z0-9_-]+)',
+        r'drive\.google\.com/drive/u/\d+/folders/([a-zA-Z0-9_-]+)',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, drive_link)
+        if match:
+            return match.group(1)
+
+    raise ValueError(f"Could not extract folder ID from Google Drive link: {drive_link}")
+
+
+def init_drive_service(service_account_path: str = 'sa.json'):
+    """
+    Initialize Google Drive API service using service account JSON.
+    Supports both file-based (local) and environment-based (Cloud Run) credentials.
+    """
+    try:
+        # Try to use service account file if it exists (local development)
+        if os.path.exists(service_account_path):
+            credentials = service_account.Credentials.from_service_account_file(
+                service_account_path,
+                scopes=['https://www.googleapis.com/auth/drive.readonly']
+            )
+            service = build('drive', 'v3', credentials=credentials)
+            return service
+
+        # Fall back to environment-based credentials (Cloud Run)
+        from google.auth import default
+        credentials, _ = default(scopes=['https://www.googleapis.com/auth/drive.readonly'])
+        service = build('drive', 'v3', credentials=credentials)
+        return service
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize Google Drive API service: {e}")
+
+
+def list_drive_files(drive_service, folder_id: str) -> List[Dict[str, Any]]:
+    """
+    List all files in a Google Drive folder (recursively).
+    Returns list of file metadata with id, name, mimeType, and path.
+    """
+    image_mimetypes = [
+        'image/jpeg',
+        'image/png',
+        'image/gif',
+        'image/bmp',
+        'image/tiff',
+        'image/webp'
+    ]
+
+    files = []
+
+    def list_folder_contents(folder_id: str, path_prefix: str = ""):
+        """Recursively list folder contents"""
+        query = f"'{folder_id}' in parents and trashed=false"
+        page_token = None
+
+        while True:
+            try:
+                response = drive_service.files().list(
+                    q=query,
+                    spaces='drive',
+                    fields='nextPageToken, files(id, name, mimeType)',
+                    pageToken=page_token
+                ).execute()
+
+                for file in response.get('files', []):
+                    file_path = f"{path_prefix}/{file['name']}" if path_prefix else file['name']
+
+                    if file['mimeType'] == 'application/vnd.google-apps.folder':
+                        # Recursively list subfolder
+                        list_folder_contents(file['id'], file_path)
+                    elif file['mimeType'] in image_mimetypes:
+                        # Add image file
+                        files.append({
+                            'id': file['id'],
+                            'name': file['name'],
+                            'mimeType': file['mimeType'],
+                            'path': file_path
+                        })
+
+                page_token = response.get('nextPageToken')
+                if not page_token:
+                    break
+            except Exception as e:
+                logger.error(f"Error listing Drive folder {folder_id}: {e}")
+                break
+
+    list_folder_contents(folder_id)
+    return files
+
+
+def download_drive_file(drive_service, file_id: str) -> bytes:
+    """Download a file from Google Drive and return as bytes"""
+    try:
+        request = drive_service.files().get_media(fileId=file_id)
+        file_bytes = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_bytes, request)
+
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+
+        return file_bytes.getvalue()
+    except Exception as e:
+        raise RuntimeError(f"Failed to download file from Google Drive: {e}")
+
+
+def copy_drive_to_gcs_worker(job_id: str, drive_link: str, gcs_bucket: str,
+                              gcs_directory: str, gcs_service_account: Optional[str] = 'sa.json') -> None:
+    """
+    Copy all files from a Google Drive folder to Google Cloud Storage.
+
+    Args:
+        job_id: Unique job identifier for tracking
+        drive_link: Google Drive folder URL
+        gcs_bucket: Target GCS bucket name
+        gcs_directory: Target directory path in GCS bucket
+        gcs_service_account: Path to service account JSON file
+    """
+    logger.info(f"[COPY-DRIVE-TO-GCS {job_id}] Job started - Drive: {drive_link}, GCS: gs://{gcs_bucket}/{gcs_directory}")
+
+    # Initialize job tracking
+    ACTIVE_DIGESTS[job_id] = {
+        'job_id': job_id,
+        'type': 'drive_to_gcs_copy',
+        'status': 'processing',
+        'progress': 0,
+        'total_files': 0,
+        'files_copied': 0,
+        'files_failed': 0,
+        'drive_link': drive_link,
+        'gcs_bucket': gcs_bucket,
+        'gcs_directory': gcs_directory,
+        'start_time': datetime.now().isoformat(),
+        'end_time': None,
+        'error_message': None,
+        'copied_files': [],
+        'failed_files': []
+    }
+
+    try:
+        # Extract folder ID from Drive link
+        folder_id = extract_folder_id_from_drive_link(drive_link)
+        logger.info(f"[COPY-DRIVE-TO-GCS {job_id}] Extracted folder ID: {folder_id}")
+
+        # Initialize Drive service
+        drive_service = init_drive_service(gcs_service_account)
+        logger.info(f"[COPY-DRIVE-TO-GCS {job_id}] Drive service initialized")
+
+        # Initialize GCS client
+        gcs_client = init_gcs_client(gcs_service_account)
+        bucket = gcs_client.bucket(gcs_bucket)
+        logger.info(f"[COPY-DRIVE-TO-GCS {job_id}] GCS client initialized")
+
+        # List all files from Drive folder
+        drive_files = list_drive_files(drive_service, folder_id)
+        ACTIVE_DIGESTS[job_id]['total_files'] = len(drive_files)
+        logger.info(f"[COPY-DRIVE-TO-GCS {job_id}] Found {len(drive_files)} files in Drive folder")
+
+        if len(drive_files) == 0:
+            ACTIVE_DIGESTS[job_id]['status'] = 'completed'
+            ACTIVE_DIGESTS[job_id]['progress'] = 100
+            ACTIVE_DIGESTS[job_id]['end_time'] = datetime.now().isoformat()
+            logger.warning(f"[COPY-DRIVE-TO-GCS {job_id}] No files found in Drive folder")
+            return
+
+        # Copy files from Drive to GCS
+        for idx, file_info in enumerate(drive_files):
+            try:
+                logger.info(f"[COPY-DRIVE-TO-GCS {job_id}] Copying file {idx + 1}/{len(drive_files)}: {file_info['path']}")
+
+                # Download from Drive
+                file_bytes = download_drive_file(drive_service, file_info['id'])
+
+                # Determine GCS blob name (preserve folder structure)
+                # Normalize directory path
+                gcs_dir = gcs_directory.strip('/') if gcs_directory else ''
+                blob_name = f"{gcs_dir}/{file_info['path']}" if gcs_dir else file_info['path']
+
+                # Upload to GCS
+                blob = bucket.blob(blob_name)
+
+                # Determine content type based on file extension
+                content_type = file_info.get('mimeType', 'application/octet-stream')
+                blob.upload_from_string(file_bytes, content_type=content_type)
+
+                ACTIVE_DIGESTS[job_id]['files_copied'] += 1
+                ACTIVE_DIGESTS[job_id]['copied_files'].append({
+                    'name': file_info['name'],
+                    'path': file_info['path'],
+                    'gcs_path': f"gs://{gcs_bucket}/{blob_name}",
+                    'size': len(file_bytes)
+                })
+
+                logger.info(f"[COPY-DRIVE-TO-GCS {job_id}] Successfully copied: {file_info['path']} -> gs://{gcs_bucket}/{blob_name}")
+
+            except Exception as e:
+                logger.error(f"[COPY-DRIVE-TO-GCS {job_id}] Failed to copy {file_info['path']}: {e}")
+                ACTIVE_DIGESTS[job_id]['files_failed'] += 1
+                ACTIVE_DIGESTS[job_id]['failed_files'].append({
+                    'name': file_info['name'],
+                    'path': file_info['path'],
+                    'error': str(e)
+                })
+
+            # Update progress
+            ACTIVE_DIGESTS[job_id]['progress'] = int(((idx + 1) / len(drive_files)) * 100)
+
+        # Mark as completed
+        ACTIVE_DIGESTS[job_id]['status'] = 'completed'
+        ACTIVE_DIGESTS[job_id]['progress'] = 100
+        ACTIVE_DIGESTS[job_id]['end_time'] = datetime.now().isoformat()
+        logger.info(f"[COPY-DRIVE-TO-GCS {job_id}] Job completed - Copied: {ACTIVE_DIGESTS[job_id]['files_copied']}, Failed: {ACTIVE_DIGESTS[job_id]['files_failed']}")
+
+    except Exception as e:
+        ACTIVE_DIGESTS[job_id]['status'] = 'failed'
+        ACTIVE_DIGESTS[job_id]['error_message'] = str(e)
+        ACTIVE_DIGESTS[job_id]['end_time'] = datetime.now().isoformat()
+        logger.error(f"[COPY-DRIVE-TO-GCS {job_id}] Job failed: {str(e)}", exc_info=True)
+
+
 # Pydantic response models (minimal)
 class FacialArea(BaseModel):
     x: int
@@ -448,8 +683,13 @@ async def get_embedding(image: UploadFile = File(...)):
 
 
 @app.post('/search-face')
-async def search_face(image: UploadFile = File(...), collection_name: str = QDRANT_COLLECTION, 
-                      group_id: Optional[str] = None, confidence: float = 0.8, limit: int = 5):
+async def search_face(
+    image: UploadFile = File(...),
+    collection_name: str = Form(default=QDRANT_COLLECTION),
+    group_id: Optional[str] = Form(default=None),
+    confidence: float = Form(default=0.8),
+    limit: int = Form(default=5)
+):
     """
     Search for similar faces in the image across Qdrant database.
     
@@ -1180,6 +1420,23 @@ class DigestRequest(BaseModel):
             raise ValueError("Cannot specify multiple sources (GCS, S3, or local directory). Choose only one.")
 
 
+class CopyDriveToGcsRequest(BaseModel):
+    drive_link: str
+    gcs_bucket: str
+    gcs_directory: Optional[str] = ""
+    gcs_service_account: Optional[str] = 'sa.json'
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "drive_link": "https://drive.google.com/drive/folders/1ABCdefGHIjklmnoPQRSTuvwxyz",
+                "gcs_bucket": "my-bucket",
+                "gcs_directory": "photos/event_name",
+                "gcs_service_account": "sa.json"
+            }
+        }
+
+
 @app.post('/digest')
 async def digest_endpoint(req: DigestRequest, background_tasks: BackgroundTasks):
     """
@@ -1292,6 +1549,57 @@ async def cluster_endpoint(req: ClusterRequest, background_tasks: BackgroundTask
         job_id = f"cluster-{uuid.uuid4()}"
         background_tasks.add_task(cluster_worker, req.group_id, req.collection, req.confidence)
         return JSONResponse(status_code=202, content={"job_id": job_id, "status": "started", "message": "Clustering task started in background (no Celery)"})
+
+
+@app.post('/copy-drive-to-gcs')
+async def copy_drive_to_gcs_endpoint(req: CopyDriveToGcsRequest, background_tasks: BackgroundTasks):
+    """
+    Copy files from Google Drive folder to Google Cloud Storage bucket.
+
+    This endpoint:
+    - Extracts folder ID from Google Drive link
+    - Lists all image files in the Drive folder (recursively)
+    - Downloads each file from Drive
+    - Uploads to specified GCS bucket and directory
+    - Preserves folder structure
+    - Returns immediately with a job_id for async tracking
+
+    Example:
+      POST /copy-drive-to-gcs with {
+        "drive_link": "https://drive.google.com/drive/folders/1ABCdefGHIjklmnoPQRSTuvwxyz",
+        "gcs_bucket": "my-bucket",
+        "gcs_directory": "photos/event_name"
+      }
+
+    Response:
+      {
+        "job_id": "digest-abc-123",
+        "status": "queued",
+        "message": "Copy task queued for processing"
+      }
+
+    Track progress with:
+      GET /get-digests/{job_id}
+    """
+    job_id = f"copy-drive-{uuid.uuid4()}"
+
+    # Schedule background task
+    background_tasks.add_task(
+        copy_drive_to_gcs_worker,
+        job_id=job_id,
+        drive_link=req.drive_link,
+        gcs_bucket=req.gcs_bucket,
+        gcs_directory=req.gcs_directory,
+        gcs_service_account=req.gcs_service_account
+    )
+
+    return JSONResponse(status_code=202, content={
+        "job_id": job_id,
+        "status": "queued",
+        "message": "Copy task from Google Drive to GCS queued for processing",
+        "drive_link": req.drive_link,
+        "destination": f"gs://{req.gcs_bucket}/{req.gcs_directory}"
+    })
 
 
 # Root

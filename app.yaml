@@ -1,0 +1,43 @@
+runtime: custom
+env: flex
+
+service: default
+
+# Use the existing Docker image from Artifact Registry
+# This will be automatically set when deploying with --image-url flag
+
+manual_scaling:
+  instances: 1
+
+resources:
+  cpu: 4
+  memory_gb: 4
+  disk_size_gb: 10
+
+# Environment variables
+env_variables:
+  QDRANT_URL: 'localhost'
+  QDRANT_PORT: '6333'
+  EMBEDDING_SIZE: '512'
+  QDRANT_COLLECTION: 'face_embeddings'
+
+# Network settings
+network:
+  forwarded_ports:
+    - 8000
+
+# Health check
+liveness_check:
+  path: "/"
+  check_interval_sec: 30
+  timeout_sec: 4
+  failure_threshold: 2
+  success_threshold: 1
+
+readiness_check:
+  path: "/"
+  check_interval_sec: 5
+  timeout_sec: 4
+  failure_threshold: 2
+  success_threshold: 1
+  app_start_timeout_sec: 300

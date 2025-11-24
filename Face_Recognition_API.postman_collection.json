@@ -1,0 +1,463 @@
+{
+	"info": {
+		"_postman_id": "face-recognition-api",
+		"name": "Face Recognition API",
+		"description": "Complete API collection for Face Recognition Service with DeepFace, Qdrant, and Google Cloud Storage",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health & Status",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/",
+							"host": ["{{base_url}}"],
+							"path": [""]
+						},
+						"description": "Check if the service is running"
+					}
+				}
+			]
+		},
+		{
+			"name": "Face Detection & Analysis",
+			"item": [
+				{
+					"name": "Get Faces",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/get-faces",
+							"host": ["{{base_url}}"],
+							"path": ["get-faces"]
+						},
+						"description": "Detect all faces in an image and return face thumbnails with facial areas"
+					}
+				},
+				{
+					"name": "Get Features",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/get-features",
+							"host": ["{{base_url}}"],
+							"path": ["get-features"]
+						},
+						"description": "Extract facial features (age, gender, emotion) from detected faces"
+					}
+				},
+				{
+					"name": "Get Embedding",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/get-embedding",
+							"host": ["{{base_url}}"],
+							"path": ["get-embedding"]
+						},
+						"description": "Generate ArcFace embeddings for all detected faces"
+					}
+				}
+			]
+		},
+		{
+			"name": "Face Search",
+			"item": [
+				{
+					"name": "Search Face",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/search-face?collection_name={{collection_name}}&confidence=0.8&limit=5",
+							"host": ["{{base_url}}"],
+							"path": ["search-face"],
+							"query": [
+								{
+									"key": "collection_name",
+									"value": "{{collection_name}}",
+									"description": "Qdrant collection to search in"
+								},
+								{
+									"key": "group_id",
+									"value": "",
+									"description": "Optional: Filter by group_id",
+									"disabled": true
+								},
+								{
+									"key": "confidence",
+									"value": "0.8",
+									"description": "Similarity threshold (0-1)"
+								},
+								{
+									"key": "limit",
+									"value": "5",
+									"description": "Max results per face"
+								}
+							]
+						},
+						"description": "Search for similar faces in Qdrant database. Parameters are sent as query params, not form fields."
+					}
+				}
+			]
+		},
+		{
+			"name": "Digest (Process Images)",
+			"item": [
+				{
+					"name": "Digest from GCS",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"gcs_bucket\": \"my-bucket\",\n    \"gcs_prefix\": \"photos/\",\n    \"group_id\": \"event_name\",\n    \"collection\": \"face_embeddings\",\n    \"confidence\": 0.7,\n    \"threads\": 4,\n    \"max_retries\": 2\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/digest",
+							"host": ["{{base_url}}"],
+							"path": ["digest"]
+						},
+						"description": "Process images from Google Cloud Storage bucket"
+					}
+				},
+				{
+					"name": "Digest from Local Directory",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"local_dir_path\": \"/path/to/images\",\n    \"group_id\": \"event_name\",\n    \"collection\": \"face_embeddings\",\n    \"confidence\": 0.7,\n    \"threads\": 4,\n    \"max_retries\": 2\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/digest",
+							"host": ["{{base_url}}"],
+							"path": ["digest"]
+						},
+						"description": "Process images from local directory"
+					}
+				},
+				{
+					"name": "Get All Digests",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/get-digests",
+							"host": ["{{base_url}}"],
+							"path": ["get-digests"]
+						},
+						"description": "Get status of all digest jobs"
+					}
+				},
+				{
+					"name": "Get Digest by Job ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/get-digests/:job_id",
+							"host": ["{{base_url}}"],
+							"path": ["get-digests", ":job_id"],
+							"variable": [
+								{
+									"key": "job_id",
+									"value": "digest-abc123"
+								}
+							]
+						},
+						"description": "Get detailed status of a specific digest job"
+					}
+				}
+			]
+		},
+		{
+			"name": "Clustering",
+			"item": [
+				{
+					"name": "Cluster Faces",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"group_id\": \"event_name\",\n    \"collection\": \"face_embeddings\",\n    \"confidence\": 0.8\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/cluster-faces",
+							"host": ["{{base_url}}"],
+							"path": ["cluster-faces"]
+						},
+						"description": "Cluster faces by similarity using DBSCAN"
+					}
+				},
+				{
+					"name": "Get All Clusters",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/get-clusters",
+							"host": ["{{base_url}}"],
+							"path": ["get-clusters"]
+						},
+						"description": "Get status of all clustering jobs"
+					}
+				},
+				{
+					"name": "Get Cluster by Job ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/get-clusters/:job_id",
+							"host": ["{{base_url}}"],
+							"path": ["get-clusters", ":job_id"],
+							"variable": [
+								{
+									"key": "job_id",
+									"value": "cluster-abc123"
+								}
+							]
+						},
+						"description": "Get detailed status of a specific clustering job"
+					}
+				}
+			]
+		},
+		{
+			"name": "Google Drive to GCS",
+			"item": [
+				{
+					"name": "Copy Drive to GCS",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"drive_link\": \"https://drive.google.com/drive/folders/1ABCdefGHIjklmnoPQRSTuvwxyz\",\n    \"gcs_bucket\": \"my-bucket\",\n    \"gcs_directory\": \"photos/event_name\",\n    \"gcs_service_account\": \"sa.json\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/copy-drive-to-gcs",
+							"host": ["{{base_url}}"],
+							"path": ["copy-drive-to-gcs"]
+						},
+						"description": "Copy files from Google Drive folder to Google Cloud Storage"
+					}
+				}
+			]
+		},
+		{
+			"name": "Complete Workflow Examples",
+			"item": [
+				{
+					"name": "1. Copy Drive to GCS",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"drive_link\": \"{{drive_folder_url}}\",\n    \"gcs_bucket\": \"{{gcs_bucket}}\",\n    \"gcs_directory\": \"{{gcs_directory}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/copy-drive-to-gcs",
+							"host": ["{{base_url}}"],
+							"path": ["copy-drive-to-gcs"]
+						},
+						"description": "Step 1: Copy images from Drive to GCS"
+					}
+				},
+				{
+					"name": "2. Digest Images from GCS",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"gcs_bucket\": \"{{gcs_bucket}}\",\n    \"gcs_prefix\": \"{{gcs_directory}}/\",\n    \"group_id\": \"{{group_id}}\",\n    \"threads\": 4\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/digest",
+							"host": ["{{base_url}}"],
+							"path": ["digest"]
+						},
+						"description": "Step 2: Extract faces and generate embeddings"
+					}
+				},
+				{
+					"name": "3. Cluster Faces",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"group_id\": \"{{group_id}}\",\n    \"confidence\": 0.8\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/cluster-faces",
+							"host": ["{{base_url}}"],
+							"path": ["cluster-faces"]
+						},
+						"description": "Step 3: Cluster similar faces together"
+					}
+				},
+				{
+					"name": "4. Search for Face",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "{{base_url}}/search-face?collection_name={{collection_name}}&group_id={{group_id}}&confidence=0.8&limit=10",
+							"host": ["{{base_url}}"],
+							"path": ["search-face"],
+							"query": [
+								{
+									"key": "collection_name",
+									"value": "{{collection_name}}",
+									"description": "Qdrant collection to search"
+								},
+								{
+									"key": "group_id",
+									"value": "{{group_id}}",
+									"description": "Filter by group"
+								},
+								{
+									"key": "confidence",
+									"value": "0.8",
+									"description": "Similarity threshold"
+								},
+								{
+									"key": "limit",
+									"value": "10",
+									"description": "Max results"
+								}
+							]
+						},
+						"description": "Step 4: Search for similar faces using query parameters"
+					}
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8000",
+			"type": "string"
+		},
+		{
+			"key": "gcs_bucket",
+			"value": "my-bucket",
+			"type": "string"
+		},
+		{
+			"key": "gcs_directory",
+			"value": "photos/event_name",
+			"type": "string"
+		},
+		{
+			"key": "group_id",
+			"value": "event_name",
+			"type": "string"
+		},
+		{
+			"key": "drive_folder_url",
+			"value": "https://drive.google.com/drive/folders/YOUR_FOLDER_ID",
+			"type": "string"
+		}
+	]
+}
