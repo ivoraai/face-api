@@ -1045,14 +1045,14 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
                 for face_idx, face in enumerate(faces):
                     try:
                         face_img = face['face']
-                        # Resize to standard size for embedding
-                        face_resized = cv2.resize(face_img, (224, 224))
-                        
-                        # Generate embedding with retry
+
+                        # Generate embedding from ORIGINAL high-res face (no resize)
+                        # Thumbnails are created separately at 1000x1000
+                        # Using original resolution produces better quality embeddings
                         embedding_objs = None
                         for attempt in range(max_retries + 1):
                             try:
-                                embedding_objs = DeepFace.represent(face_resized, model_name='ArcFace', enforce_detection=False)
+                                embedding_objs = DeepFace.represent(face_img, model_name='ArcFace', enforce_detection=False)
                                 break
                             except Exception as e:
                                 if attempt < max_retries:
