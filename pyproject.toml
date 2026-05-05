@@ -2,7 +2,7 @@
 name = "dr"
 version = "0.1.0"
 description = "Google Drive file copy utilities and facial processing services"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 
 dependencies = [
     "opencv-python>=4.8.0",
@@ -18,7 +18,12 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
     "python-multipart>=0.0.9",
-    "google-cloud-storage>=2.10.0"
+    "google-cloud-storage>=2.10.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth-httplib2>=0.1.1",
+    "google-auth-oauthlib>=1.1.0",
+    "retina-face==0.0.17",
+    "arcface==0.0.8"
 ]
 
 [build-system]
