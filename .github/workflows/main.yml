@@ -75,7 +75,7 @@ jobs:
             --region=${{ env.GCP_REGION }} \
             --platform=managed \
             --service-account=test-803@image-478813.iam.gserviceaccount.com \
-            --memory=4Gi \
+            --memory=8Gi \
             --cpu=4 \
             --execution-environment=gen2 \
             --no-cpu-throttling \
