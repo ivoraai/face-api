@@ -85,7 +85,7 @@ jobs:
             --timeout=3600 \
             --concurrency=4 \
             --port=8000 \
-            --startup-cpu-boost \
+            --cpu-boost \
             --no-traffic \
             --quiet
           gcloud run services update-traffic ${{ env.SERVICE_NAME }} \
