@@ -55,8 +55,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import time
-from sklearn.cluster import DBSCAN
-from sklearn.metrics.pairwise import cosine_distances
+from sklearn.cluster import AgglomerativeClustering
 from google.cloud import storage
 from google.oauth2 import service_account
 import io
@@ -823,7 +822,7 @@ async def search_face(
 def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optional[str],
                   s3_prefix: Optional[str], gcs_bucket: Optional[str], gcs_prefix: Optional[str],
                   gcs_service_account: Optional[str], group_id: str, collection: str,
-                  confidence: float, threads: int, max_retries: int = 2) -> None:
+                  threads: int, max_retries: int = 2) -> None:
     """
     Process images from local directory, S3 bucket, or GCS bucket, extract faces, generate embeddings,
     create thumbnails, and upsert to Qdrant with multi-threading support, automatic collection creation,
@@ -871,7 +870,6 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
             'matched_faces': 0,
             'collection': collection,
             'source': source,
-            'confidence': confidence,
             'threads': threads,
             'start_time': datetime.now().isoformat(),
             'end_time': None,
@@ -1052,7 +1050,7 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
                         embedding_objs = None
                         for attempt in range(max_retries + 1):
                             try:
-                                embedding_objs = DeepFace.represent(face_img, model_name='ArcFace', enforce_detection=False)
+                                embedding_objs = DeepFace.represent(face_img, model_name='ArcFace', enforce_detection=False, detector_backend='skip')
                                 break
                             except Exception as e:
                                 if attempt < max_retries:
@@ -1197,16 +1195,18 @@ def digest_worker(job_id: str, local_dir_path: Optional[str], s3_bucket: Optiona
 
 def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidence: float = 0.8) -> Dict[str, Any]:
     """
-    Cluster faces by group_id using DBSCAN.
-    
+    Cluster faces by group_id using Agglomerative Clustering with average linkage.
+
+    Average linkage uses the mean distance between all pairs across two candidate clusters,
+    which prevents the chaining problem that DBSCAN (min_samples=1) suffers from.
+
     Args:
         group_id: The group to cluster
         collection: Qdrant collection name
-        confidence: Similarity threshold (0-1). Faces with distance >= (1 - confidence) are same cluster.
-                   E.g., confidence=0.8 means distance <= 0.2
-    
-    Returns:
-        Status dict with clustering results
+        confidence: Controls merge aggressiveness via distance_threshold = 1 - confidence.
+                    ArcFace same-person cosine dist is typically 0.3-0.5, different-person 0.5-0.8.
+                    Use 0.4-0.55 for correct separation. Too high (>0.6) → too many micro-clusters.
+                    Too low (<0.3) → everything merges into 1 cluster.
     """
     job_id = f"cluster-{uuid.uuid4()}"
     logger.info(f"[CLUSTER {job_id}] Job started - group_id={group_id}, collection={collection}, confidence={confidence}")
@@ -1229,34 +1229,31 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
     }
     
     try:
-        # Fetch all points with this group_id
+        # Fetch all points for this group_id using cursor-based pagination
         all_points = []
-        offset = 0
+        offset = None
         batch_size = 100
-        
+
         while True:
             try:
-                points = qclient.scroll(
+                points, offset = qclient.scroll(
                     collection_name=collection,
                     limit=batch_size,
                     offset=offset,
                     with_vectors=True,
                     with_payload=True
-                )[0]
-                
-                if not points:
-                    break
-                
-                # Filter by group_id
+                )
+
                 for point in points:
                     if point.payload.get('group_id') == group_id:
                         all_points.append(point)
-                
-                offset += batch_size
+
+                if offset is None:
+                    break
             except Exception as e:
-                print(f"[cluster] Error scrolling: {e}")
+                logger.error(f"[CLUSTER {job_id}] Error scrolling: {e}")
                 break
-        
+
         if not all_points:
             logger.warning(f"[CLUSTER {job_id}] No faces found for group_id: {group_id}")
             ACTIVE_CLUSTERS[job_id].update({
@@ -1267,28 +1264,29 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
                 'end_time': datetime.now().isoformat()
             })
             return ACTIVE_CLUSTERS[job_id]
-        
-        # Extract embeddings and point IDs
+
         embeddings = np.array([point.vector for point in all_points])
         point_ids = [point.id for point in all_points]
-        
+
         logger.info(f"[CLUSTER {job_id}] Clustering {len(all_points)} faces with confidence={confidence}")
-        
-        # Convert confidence to eps for DBSCAN
-        # confidence=0.8 means we want to group faces that are 80% similar
-        # distance = 1 - cosine_similarity, so eps = 1 - confidence
-        eps = 1 - confidence
-        
-        # Run DBSCAN clustering
-        # eps: maximum distance between two samples for them to be in the same neighborhood
-        # min_samples: minimum number of samples in a neighborhood for a point to be considered core point
-        distances = cosine_distances(embeddings)
-        clusterer = DBSCAN(eps=eps, min_samples=1, metric='precomputed')
-        cluster_labels = clusterer.fit_predict(distances)
-        
-        # Group points by cluster
-        clusters = {}
+
+        distance_threshold = 1.0 - confidence
+
+        if len(all_points) == 1:
+            cluster_labels = np.array([0])
+        else:
+            clusterer = AgglomerativeClustering(
+                n_clusters=None,
+                distance_threshold=distance_threshold,
+                metric='cosine',
+                linkage='average'
+            )
+            cluster_labels = clusterer.fit_predict(embeddings)
+
+        # Group points by cluster label
+        clusters: Dict[int, list] = {}
         for idx, label in enumerate(cluster_labels):
+            label = int(label)
             if label not in clusters:
                 clusters[label] = []
             clusters[label].append({
@@ -1296,27 +1294,26 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
                 'index': idx,
                 'original_face_id': all_points[idx].payload.get('face_id')
             })
-        
+
         logger.info(f"[CLUSTER {job_id}] Created {len(clusters)} clusters")
-        
-        # Assign person_id to each cluster and update Qdrant
+
+        # Assign person_id per cluster and batch-update Qdrant (one call per cluster)
         person_id_counter = 1
         updated_count = 0
         updated_faces = []
-        
+
         for cluster_id, faces in clusters.items():
             person_id = f"person_{group_id}_{person_id_counter}"
-            
-            # Update all faces in this cluster with the same person_id
-            for face in faces:
-                try:
-                    qclient.set_payload(
-                        collection_name=collection,
-                        payload_key="person_id",
-                        payload=person_id,
-                        points=[face['point_id']]
-                    )
-                    updated_count += 1
+            point_list = [f['point_id'] for f in faces]
+
+            try:
+                qclient.set_payload(
+                    collection_name=collection,
+                    payload={"person_id": person_id},
+                    points=point_list
+                )
+                updated_count += len(faces)
+                for face in faces:
                     updated_faces.append({
                         'point_id': face['point_id'],
                         'original_face_id': face['original_face_id'],
@@ -1324,9 +1321,9 @@ def cluster_worker(group_id: str, collection: str = QDRANT_COLLECTION, confidenc
                         'cluster_id': cluster_id,
                         'cluster_size': len(faces)
                     })
-                except Exception as e:
-                    logger.error(f"[CLUSTER {job_id}] Error updating point {face['point_id']}: {e}")
-            
+            except Exception as e:
+                logger.error(f"[CLUSTER {job_id}] Error updating cluster {cluster_id}: {e}")
+
             person_id_counter += 1
         
         result = {
@@ -1388,7 +1385,6 @@ class DigestRequest(BaseModel):
     local_dir_path: Optional[str] = None
     group_id: str
     collection: str = QDRANT_COLLECTION
-    confidence: float = 0.5
     threads: int = 4
     max_retries: int = 2
 
@@ -1399,7 +1395,6 @@ class DigestRequest(BaseModel):
                 "gcs_prefix": "photos/",
                 "group_id": "engagement_photos",
                 "collection": "face_embeddings",
-                "confidence": 0.7,
                 "threads": 4,
                 "max_retries": 2
             }
@@ -1470,7 +1465,6 @@ async def digest_endpoint(req: DigestRequest, background_tasks: BackgroundTasks)
         gcs_service_account=req.gcs_service_account,
         group_id=req.group_id,
         collection=req.collection,
-        confidence=req.confidence,
         threads=req.threads,
         max_retries=req.max_retries
     )
@@ -1537,7 +1531,7 @@ async def get_cluster_status(job_id: str):
 class ClusterRequest(BaseModel):
     group_id: str
     collection: str = QDRANT_COLLECTION
-    confidence: float = 0.8  # Similarity threshold for clustering (0-1)
+    confidence: float = 0.45  # ArcFace same-person cosine dist ~0.3-0.5; threshold = 1 - confidence
 
 
 @app.post('/cluster-faces')
